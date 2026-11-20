@@ -1,0 +1,22 @@
+[package]
+name = "sygg"
+version = "0.1.0"
+edition = "2024"
+description = "A symbolic algebra REPL and expression simplifier powered by egg"
+authors = ["Sophie de Jong <dejongmsophie@gmail.com>"]
+
+[[bin]]
+name = "sygg"
+path = "bin/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+crossterm = "0.29"
+egg = "0.11"
+env_logger = "0.11"
+log = "0.4"
+thiserror = "2"
+unicode-width = "0.2"
+
+[profile.release]
+lto = true

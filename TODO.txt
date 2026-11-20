@@ -1,0 +1,8 @@
+1. Lets should be renamed to something new, like vars
+2. Lets don't need to be "expanded", we can just use the egraph API for this (i.e. union the variable with its expanded form)
+3. Costs should be either Size or Depth, and the profile should just define how much weight each node adds to the calculation (i.e. the Strategy type should be name, description CostKind (size or depth) and profile)
+4. Profile should have a nicer API, derive Default and then each strategy can just ..Default::default() except for the nodes that need to have their weights adjusted
+5. WeightedCost and WeightedProfile are basically the same thing
+6. WeightedCost does the full recursive cost calculation instead of caculating cost for a single node. This is the way it should be implemented
+7. Cost function should return a single value representing the cost, not ShapeCost. Look at examples in the egg docs for reference.
+8. Instead of stopped_early as a bool, make it stop_reason and have the reason be a StopReason (from the egg library). It does not need to be option, as the egg docs specifically say that after run is called StopReason will always be Some
