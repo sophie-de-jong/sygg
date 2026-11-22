@@ -1,6 +1,6 @@
 [package]
 name = "sygg"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "A symbolic algebra REPL and expression simplifier powered by egg"
 authors = ["Sophie de Jong <dejongmsophie@gmail.com>"]

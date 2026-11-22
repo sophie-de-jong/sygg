@@ -1,4 +1,4 @@
-use std::fs::OpenOptions;
+use std::{fs::OpenOptions, time::Duration};
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -58,17 +58,21 @@ struct Cli {
     #[arg(short = 'v', long = "verbose", action = ArgAction::Count)]
     verbose: u8,
 
-    /// Maximum number of e-graph iterations per strategy
+    /// Maximum number of e-graph iterations
     #[arg(long, default_value_t = 15, value_name = "N")]
     max_iterations: usize,
 
-    /// Maximum number of e-graph nodes per strategy
+    /// Maximum number of e-graph nodes
     #[arg(long, default_value_t = 20_000, value_name = "N")]
     max_nodes: usize,
 
-    /// Time limit per strategy, in milliseconds
+    /// Time limit for e-graph saturation, in milliseconds
     #[arg(long, default_value_t = 750, value_name = "MS")]
     time_limit: u64,
+
+    /// Maximum expression depth that rewrites may introduce
+    #[arg(long, default_value_t = 32, value_name = "N")]
+    max_depth: usize,
 }
 
 fn main() -> ExitCode {
@@ -87,7 +91,8 @@ fn main() -> ExitCode {
     let mut engine = AlgebraEngine::new(EngineConfig {
         max_iterations: cli.max_iterations,
         max_nodes: cli.max_nodes,
-        time_limit_ms: cli.time_limit,
+        time_limit: Duration::from_millis(cli.time_limit),
+        max_depth: cli.max_depth,
         load_default_rules: !cli.no_default_rules,
     });
 

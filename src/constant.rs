@@ -64,10 +64,24 @@ impl fmt::Display for Real {
 
         let magnitude = value.abs();
         if magnitude >= 1e15 || magnitude < 1e-9 {
-            return write!(f, "{value:e}");
+            let text = format!("{value:.9e}");
+            if let Some((mantissa, exponent)) = text.split_once('e') {
+                let mantissa = trim_decimal(mantissa);
+                let exponent = exponent.parse::<i32>().unwrap_or(0);
+                return write!(f, "{mantissa}e{exponent}");
+            }
+            return f.write_str(&text);
         }
 
-        write!(f, "{value}")
+        f.write_str(&trim_decimal(&format!("{value:.12}")))
+    }
+}
+
+fn trim_decimal(text: &str) -> String {
+    if text.contains('.') {
+        text.trim_end_matches('0').trim_end_matches('.').to_string()
+    } else {
+        text.to_string()
     }
 }
 
@@ -459,11 +473,17 @@ impl Constant {
     pub fn pow(&self, other: &Self) -> Option<Self> {
         match (self, other) {
             (Constant::Real(a), Constant::Real(b)) => {
+                let value = a.get();
                 let exponent = b.get();
-                if a.get() < 0.0 && exponent.fract() != 0.0 {
+                if value < 0.0 && exponent.fract() != 0.0 {
+                    // Support the common cube-root case; other fractional
+                    // powers of negative reals stay symbolic.
+                    if (exponent - 1.0 / 3.0).abs() < 1e-12 {
+                        return Constant::real(value.cbrt());
+                    }
                     return None;
                 }
-                Constant::real(a.get().powf(exponent))
+                Constant::real(value.powf(exponent))
             }
             (Constant::Vector(a), Constant::Real(b)) => a
                 .iter()
@@ -627,6 +647,7 @@ mod tests {
     fn real_display() {
         assert_eq!(Real::new(2.0).unwrap().to_string(), "2");
         assert_eq!(Real::new(3.14).unwrap().to_string(), "3.14");
+        assert_eq!(Real::new(0.1 + 0.2).unwrap().to_string(), "0.3");
         assert_eq!(Real::new(-0.0).unwrap().to_string(), "0");
     }
 

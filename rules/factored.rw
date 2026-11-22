@@ -1,0 +1,18 @@
+# Scalar factoring.
+factor: a * b + a * c => a * (b + c) if is_scalar(a) and is_scalar(b) and is_scalar(c) and not is_const(a) and not (is_const(b) and is_const(c))
+factor-right: b * a + c * a => (b + c) * a if is_scalar(a) and is_scalar(b) and is_scalar(c) and not is_const(a)
+factor-sub: a * b - a * c => a * (b - c) if is_scalar(a) and is_scalar(b) and is_scalar(c) and not is_const(a) and not (is_const(b) and is_const(c))
+factor-right-sub: b * a - c * a => (b - c) * a if is_scalar(a) and is_scalar(b) and is_scalar(c) and not is_const(a)
+factor-one: a * b + a => a * (b + 1) if is_scalar(a) and is_scalar(b) and not is_const(a) and not (is_const(b))
+factor-one-right: b * a + a => (b + 1) * a if is_scalar(a) and is_scalar(b) and not is_const(a)
+factor-one-sub: a * b - a => a * (b - 1) if is_scalar(a) and is_scalar(b) and not is_const(a) and not (is_const(b))
+factor-one-right-sub: b * a - a => (b - 1) * a if is_scalar(a) and is_scalar(b) and not is_const(a)
+
+# Polynomial factorizations.
+difference-of-squares: a ^ 2 - b ^ 2 => (a - b) * (a + b) if is_scalar(a) and is_scalar(b)
+perfect-square-add: a ^ 2 + 2 * a * b + b ^ 2 => (a + b) ^ 2 if is_scalar(a) and is_scalar(b)
+perfect-square-sub: a ^ 2 - 2 * a * b + b ^ 2 => (a - b) ^ 2 if is_scalar(a) and is_scalar(b)
+difference-of-cubes: a ^ 3 - b ^ 3 => (a - b) * (a ^ 2 + a * b + b ^ 2) if is_scalar(a) and is_scalar(b)
+sum-of-cubes: a ^ 3 + b ^ 3 => (a + b) * (a ^ 2 - a * b + b ^ 2) if is_scalar(a) and is_scalar(b)
+perfect-square-one: a ^ 2 + 2 * a + 1 => (a + 1) ^ 2 if is_scalar(a)
+perfect-square-minus-one: a ^ 2 - 2 * a + 1 => (a - 1) ^ 2 if is_scalar(a)

@@ -4,11 +4,15 @@ use core::fmt;
 use std::collections::HashMap;
 use std::path::Path;
 
-use egg::{ConditionalApplier, ENodeOrVar, Id, Pattern, PatternAst, Rewrite, Var};
+use egg::{
+    Applier, ConditionalApplier, EGraph, ENodeOrVar, Id, Language, Pattern, PatternAst, Rewrite,
+    Subst, Symbol, Var,
+};
 
-use crate::analysis::MathRewrite;
+use crate::analysis::{ConstantFolding, MathEGraph, MathRewrite};
 use crate::ast::{Ast, parse_expression, pretty_ast_exact};
 use crate::condition::ConditionExpr;
+use crate::constant::Constant;
 use crate::error::{AlgebraError, Result};
 use crate::language::Math;
 
@@ -24,25 +28,206 @@ pub struct Rule {
 
 impl Rule {
     pub fn to_rewrite(&self) -> Result<MathRewrite> {
+        self.to_bounded_rewrite(usize::MAX)
+    }
+
+    pub fn to_bounded_rewrite(&self, max_depth: usize) -> Result<MathRewrite> {
         let mut variables = HashMap::new();
         let lhs = to_pattern_ast(&self.lhs, true, &mut variables);
         let rhs = to_pattern_ast(&self.rhs, true, &mut variables);
 
         let searcher = Pattern::new(lhs);
-        let applier = Pattern::new(rhs);
-        let rewrite = if let Some(condition) = &self.condition {
-            Rewrite::new(
-                self.name.clone(),
-                searcher,
-                ConditionalApplier {
-                    condition: condition.clone(),
-                    applier,
-                },
-            )
-        } else {
-            Rewrite::new(self.name.clone(), searcher, applier)
+        let applier = SafePatternApplier { ast: rhs };
+        let applier = ConditionalApplier {
+            condition: OptionalCondition(self.condition.clone()),
+            applier,
         };
-        rewrite.map_err(|message| AlgebraError::Rule(format!("{}: {message}", self.name)))
+        let applier = DepthBoundedApplier {
+            inner: applier,
+            rhs: self.rhs.clone(),
+            max_depth,
+        };
+        Rewrite::new(self.name.clone(), searcher, applier)
+            .map_err(|message| AlgebraError::Rule(format!("{}: {message}", self.name)))
+    }
+}
+
+#[derive(Clone, Debug)]
+struct OptionalCondition(Option<ConditionExpr>);
+
+impl egg::Condition<Math, ConstantFolding> for OptionalCondition {
+    fn check(&self, egraph: &mut MathEGraph, eclass: Id, subst: &Subst) -> bool {
+        self.0
+            .as_ref()
+            .is_none_or(|condition| condition.check(egraph, eclass, subst))
+    }
+
+    fn vars(&self) -> Vec<Var> {
+        self.0
+            .as_ref()
+            .map_or_else(Vec::new, ConditionExpr::collect_vars)
+    }
+}
+
+/// Instantiates a rule's right-hand side but refuses to merge two e-classes
+/// that already contain different constants.
+///
+/// Equality saturation normally never puts two different constants in the
+/// same e-class.  Floating-point rounding and underflow can nevertheless
+/// produce near-equal constants (ultimately including zero) for expressions
+/// that are mathematically equal.  If such a class is then used as a pattern
+/// constant, every rule with a literal `0` or `1` can match unrelated terms.
+/// Keeping the one-constant-per-class invariant makes literal patterns sound.
+struct SafePatternApplier {
+    ast: PatternAst<Math>,
+}
+
+impl Applier<Math, ConstantFolding> for SafePatternApplier {
+    fn apply_one(
+        &self,
+        egraph: &mut EGraph<Math, ConstantFolding>,
+        eclass: Id,
+        subst: &Subst,
+        _searcher_ast: Option<&PatternAst<Math>>,
+        _rule_name: Symbol,
+    ) -> Vec<Id> {
+        let mut ids = vec![Id::from(0); self.ast.len()];
+        for (index, node) in self.ast.as_ref().iter().enumerate() {
+            let id = match node {
+                ENodeOrVar::Var(variable) => subst[*variable],
+                ENodeOrVar::ENode(enode) => {
+                    let instantiated = enode.clone().map_children(|child| ids[usize::from(child)]);
+                    egraph.add(instantiated)
+                }
+            };
+            ids[index] = id;
+        }
+
+        let Some(rhs) = ids.last().copied() else {
+            return Vec::new();
+        };
+        if constants_conflict(egraph, rhs, eclass) {
+            return Vec::new();
+        }
+
+        if egraph.union(rhs, eclass) {
+            vec![eclass]
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn vars(&self) -> Vec<Var> {
+        self.ast
+            .as_ref()
+            .iter()
+            .filter_map(|node| match node {
+                ENodeOrVar::Var(variable) => Some(*variable),
+                ENodeOrVar::ENode(_) => None,
+            })
+            .collect()
+    }
+
+    fn get_pattern_ast(&self) -> Option<&PatternAst<Math>> {
+        Some(&self.ast)
+    }
+}
+
+fn constants_conflict(egraph: &MathEGraph, left: Id, right: Id) -> bool {
+    let left = egraph.find(left);
+    let right = egraph.find(right);
+    if left == right {
+        return false;
+    }
+
+    let mut constants = class_constants(egraph, left);
+    constants.extend(class_constants(egraph, right));
+    let Some(first) = constants.first() else {
+        return false;
+    };
+    constants.iter().any(|constant| constant != first)
+}
+
+fn class_constants(egraph: &MathEGraph, id: Id) -> Vec<Constant> {
+    let class = &egraph[egraph.find(id)];
+    let explicit = class
+        .nodes
+        .iter()
+        .filter_map(|node| match node {
+            Math::Const(value) => Some(value.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if explicit.is_empty() {
+        class.data.constant.iter().cloned().collect()
+    } else {
+        explicit
+    }
+}
+
+struct DepthBoundedApplier<A> {
+    inner: A,
+    rhs: Ast,
+    max_depth: usize,
+}
+
+impl<A> Applier<Math, ConstantFolding> for DepthBoundedApplier<A>
+where
+    A: Applier<Math, ConstantFolding>,
+{
+    fn apply_one(
+        &self,
+        egraph: &mut EGraph<Math, ConstantFolding>,
+        eclass: Id,
+        subst: &Subst,
+        searcher_ast: Option<&PatternAst<Math>>,
+        rule_name: Symbol,
+    ) -> Vec<Id> {
+        if self.max_depth != usize::MAX
+            && rhs_depth(&self.rhs, egraph, subst).is_some_and(|depth| depth > self.max_depth)
+        {
+            return Vec::new();
+        }
+        self.inner
+            .apply_one(egraph, eclass, subst, searcher_ast, rule_name)
+    }
+
+    fn vars(&self) -> Vec<Var> {
+        self.inner.vars()
+    }
+
+    fn get_pattern_ast(&self) -> Option<&PatternAst<Math>> {
+        self.inner.get_pattern_ast()
+    }
+}
+
+fn rhs_depth(ast: &Ast, egraph: &MathEGraph, subst: &Subst) -> Option<usize> {
+    match ast {
+        Ast::Const(_) => Some(1),
+        Ast::Symbol(name) => {
+            let full = if name.starts_with('?') && name.len() > 1 {
+                name.clone()
+            } else {
+                format!("?{name}")
+            };
+            let variable: Var = full.parse().ok()?;
+            let id = subst.get(variable)?;
+            Some(egraph[*id].data.depth)
+        }
+        Ast::Add(a, b) | Ast::Sub(a, b) | Ast::Mul(a, b) | Ast::Div(a, b) | Ast::Pow(a, b) => {
+            Some(1 + rhs_depth(a, egraph, subst)?.max(rhs_depth(b, egraph, subst)?))
+        }
+        Ast::Neg(inner) => Some(1 + rhs_depth(inner, egraph, subst)?),
+        Ast::Call(_, args) | Ast::Vec(args) => {
+            let depth = args
+                .iter()
+                .map(|arg| rhs_depth(arg, egraph, subst))
+                .collect::<Option<Vec<_>>>()?
+                .into_iter()
+                .max()
+                .unwrap_or(0);
+            Some(1 + depth)
+        }
     }
 }
 

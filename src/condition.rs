@@ -21,6 +21,7 @@ use crate::language::Math;
 
 #[derive(Clone, Debug)]
 pub enum ConditionExpr {
+    Predicate(Predicate, Vec<ValueExpr>),
     Compare(ValueExpr, CompareOp, ValueExpr),
     Not(Box<ConditionExpr>),
     And(Vec<ConditionExpr>),
@@ -42,6 +43,59 @@ pub enum ValueOp {
     Mul,
     Div,
     Pow,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Predicate {
+    IsConst,
+    IsScalar,
+    IsVector,
+    IsMatrix,
+    IsReal,
+    IsInteger,
+}
+
+impl Predicate {
+    fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "is_const" => Self::IsConst,
+            "is_scalar" => Self::IsScalar,
+            "is_vector" => Self::IsVector,
+            "is_matrix" => Self::IsMatrix,
+            "is_real" | "is_num" => Self::IsReal,
+            "is_integer" => Self::IsInteger,
+            _ => return None,
+        })
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::IsConst => "is_const",
+            Self::IsScalar => "is_scalar",
+            Self::IsVector => "is_vector",
+            Self::IsMatrix => "is_matrix",
+            Self::IsReal => "is_real",
+            Self::IsInteger => "is_integer",
+        }
+    }
+
+    fn evaluate(self, value: &ValueExpr, egraph: &MathEGraph, subst: &Subst) -> bool {
+        let constant = value.evaluate(egraph, subst);
+        match self {
+            Self::IsConst => constant.is_some(),
+            // Unknown symbolic values are assumed to be scalars.
+            Self::IsScalar => matches!(
+                value_type(value, egraph, subst),
+                ValueType::Scalar | ValueType::Unknown
+            ),
+            Self::IsVector => value_type(value, egraph, subst) == ValueType::Vector,
+            Self::IsMatrix => value_type(value, egraph, subst) == ValueType::Matrix,
+            Self::IsReal => matches!(constant, Some(Constant::Real(_))),
+            Self::IsInteger => {
+                matches!(constant, Some(Constant::Real(value)) if value.get().fract() == 0.0)
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -130,6 +184,11 @@ impl ConditionExpr {
 
     fn gather_vars(&self, vars: &mut Vec<Var>) {
         match self {
+            Self::Predicate(_, values) => {
+                for value in values {
+                    value.gather_vars(vars);
+                }
+            }
             Self::Compare(left, _, right) => {
                 left.gather_vars(vars);
                 right.gather_vars(vars);
@@ -145,6 +204,9 @@ impl ConditionExpr {
 
     fn evaluate(&self, egraph: &MathEGraph, subst: &Subst) -> bool {
         match self {
+            Self::Predicate(predicate, values) => values
+                .iter()
+                .all(|value| predicate.evaluate(value, egraph, subst)),
             Self::Compare(left, operator, right) => {
                 operator.evaluate(left.evaluate(egraph, subst), right.evaluate(egraph, subst))
             }
@@ -153,6 +215,65 @@ impl ConditionExpr {
             Self::Or(parts) => parts.iter().any(|part| part.evaluate(egraph, subst)),
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ValueType {
+    Unknown,
+    Scalar,
+    Vector,
+    Matrix,
+}
+
+fn value_type(value: &ValueExpr, egraph: &MathEGraph, subst: &Subst) -> ValueType {
+    match value {
+        ValueExpr::Var(variable) => subst
+            .get(*variable)
+            .map_or(ValueType::Unknown, |id| class_type(egraph, *id)),
+        ValueExpr::Const(value) => match value {
+            Constant::Real(_) => ValueType::Scalar,
+            Constant::Vector(_) => ValueType::Vector,
+            Constant::Matrix(_) => ValueType::Matrix,
+        },
+        ValueExpr::Neg(inner) => value_type(inner, egraph, subst),
+        ValueExpr::Binary(_, left, right) => {
+            let left = value_type(left, egraph, subst);
+            let right = value_type(right, egraph, subst);
+            if left == ValueType::Matrix || right == ValueType::Matrix {
+                ValueType::Matrix
+            } else if left == ValueType::Vector || right == ValueType::Vector {
+                ValueType::Vector
+            } else if left == ValueType::Scalar || right == ValueType::Scalar {
+                ValueType::Scalar
+            } else {
+                ValueType::Unknown
+            }
+        }
+    }
+}
+
+fn class_type(egraph: &MathEGraph, id: Id) -> ValueType {
+    if let Some(value) = &egraph[id].data.constant {
+        return match value {
+            Constant::Real(_) => ValueType::Scalar,
+            Constant::Vector(_) => ValueType::Vector,
+            Constant::Matrix(_) => ValueType::Matrix,
+        };
+    }
+
+    for node in &egraph[id].nodes {
+        if let Math::VecLit(items) = node {
+            let nested = items
+                .iter()
+                .any(|child| class_type(egraph, *child) == ValueType::Vector);
+            return if nested {
+                ValueType::Matrix
+            } else {
+                ValueType::Vector
+            };
+        }
+    }
+    ValueType::Unknown
 }
 
 impl ValueExpr {
@@ -176,7 +297,7 @@ impl ValueExpr {
         match self {
             ValueExpr::Var(variable) => {
                 let id = subst.get(*variable)?;
-                egraph[*id].data.clone()
+                egraph[*id].data.constant.clone()
             }
             ValueExpr::Const(value) => Some(value.clone()),
             ValueExpr::Neg(inner) => inner.evaluate(egraph, subst)?.neg(),
@@ -256,7 +377,7 @@ impl ConditionExpr {
             Self::Or(_) => 1,
             Self::And(_) => 2,
             Self::Not(_) => 3,
-            Self::Compare(_, _, _) => 4,
+            Self::Predicate(_, _) | Self::Compare(_, _, _) => 4,
         }
     }
 
@@ -267,6 +388,16 @@ impl ConditionExpr {
         }
 
         match self {
+            Self::Predicate(predicate, values) => {
+                write!(f, "{}(", predicate.name())?;
+                for (index, value) in values.iter().enumerate() {
+                    if index > 0 {
+                        f.write_str(", ")?;
+                    }
+                    value.fmt_at(0, f)?;
+                }
+                f.write_str(")")?;
+            }
             Self::Compare(left, operator, right) => {
                 left.fmt_at(0, f)?;
                 write!(f, " {} ", operator.as_str())?;
@@ -513,6 +644,15 @@ impl ConditionParser {
         &self.tokens[self.position].kind
     }
 
+    fn peek_next(&self) -> Option<&TokenKind> {
+        self.tokens.get(self.position + 1).map(|token| &token.kind)
+    }
+
+    fn is_predicate_call(&self) -> bool {
+        matches!(self.peek(), TokenKind::Ident(_))
+            && matches!(self.peek_next(), Some(TokenKind::LParen))
+    }
+
     fn column(&self) -> usize {
         self.tokens[self.position].column
     }
@@ -605,11 +745,20 @@ impl ConditionParser {
         }
 
         match self.peek().clone() {
+            TokenKind::Ident(name) if self.is_predicate_call() => {
+                self.advance();
+                self.advance();
+                let values = self.parse_value_list()?;
+                let predicate = Predicate::from_name(&name).ok_or_else(|| {
+                    ParseError::new(format!("unknown condition predicate `{name}`"), column)
+                })?;
+                Ok(ConditionExpr::Predicate(predicate, values))
+            }
             TokenKind::Ident(_) | TokenKind::Number(_) | TokenKind::Minus => {
                 let left = self.parse_value()?;
                 let Some(operator) = CompareOp::from_token(self.peek()) else {
                     return Err(ParseError::new(
-                        "expected a comparison operator",
+                        "expected a comparison operator or predicate",
                         self.column(),
                     ));
                 };
@@ -622,6 +771,27 @@ impl ConditionParser {
                 column,
             )),
         }
+    }
+
+    fn parse_value_list(&mut self) -> Result<Vec<ValueExpr>, ParseError> {
+        let mut values = Vec::new();
+        if matches!(self.peek(), TokenKind::RParen) {
+            self.advance();
+            return Ok(values);
+        }
+        loop {
+            values.push(self.parse_value()?);
+            if matches!(self.peek(), TokenKind::RParen) {
+                self.advance();
+                break;
+            }
+            self.expect(&TokenKind::Comma, "`,` or `)`")?;
+            if matches!(self.peek(), TokenKind::RParen) {
+                self.advance();
+                break;
+            }
+        }
+        Ok(values)
     }
 
     fn parse_value(&mut self) -> Result<ValueExpr, ParseError> {

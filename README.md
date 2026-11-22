@@ -3,18 +3,20 @@
 A symbolic algebra REPL and simplifier written in Rust, powered by
 [egg](https://github.com/egraphs-good/egg).
 
-`sygg` does not insist on one canonical "simplified" answer.  Every
-strategy runs the same complete rewrite rule set, and a different extraction
-cost chooses which equivalent form to show.  For example:
+`sygg` does not insist on one canonical "simplified" answer.  Every rule is
+loaded into the same e-graph, and strategies differ only in the extraction
+cost used to choose an equivalent form.  For example:
 
 ```text
 expr › x * (y + z)
-  simplified  →  x * (y + z)  [size 5]
-  expanded    →  x * y + x * z  [size 7]
+  simplified  →  x * (y + z)  [size 8]
+  expanded    →  x * y + x * z  [size 11]
 
 expr › x + x
-  simplified  →  x + x  [size 3]
-  factored    →  2 * x  [size 3]
+  simplified  →  2 * x  [size 4]
+
+expr › x * x
+  simplified  →  x^2  [size 3]
 ```
 
 ## Features
@@ -30,9 +32,10 @@ expr › x + x
 - **Constant folding** via egg's `Analysis` trait for reals, vectors and
   matrices: arithmetic, functions, matrix products, powers, determinants,
   transposes and more.
-- **Cost-based strategies**: every strategy shares the same rule set; a
+- **Cost-based strategies**: all rules run together in one e-graph; a
   size/depth cost kind, per-node weights and optional structural penalties
-  decide which forms to display.  Duplicate results are collapsed.
+  decide which equivalent form each strategy displays.  Duplicate results
+  are collapsed.
 - **Preset rule files** in `rules/` are loaded by default; use
   `--no-default-rules` to start with an empty rule set.
 - **Modern crossterm REPL** with history, completion, multi-line input,
@@ -231,8 +234,8 @@ See [`examples/rules.rw`](examples/rules.rw) for a complete example.
 expr › let pi = 3.14
 expr › let z = x + y
 expr › z * 2
-  simplified  →  2 * (x + y)  [size 5]
-  expanded    →  2 * x + 2 * y  [size 7]
+  simplified  →  2 * (x + y)  [size 8]
+  expanded    →  2 * x + 2 * y  [size 11]
 ```
 
 Variables are unioned with their defining expressions in the e-graph, so they
@@ -241,24 +244,34 @@ names that are defined later.
 
 ## Strategies
 
-All strategies run the same rewrite rule set.  The difference is the cost
-function used after the e-graph reaches its fixed point.  A strategy is a
-name, description, cost kind (`size` or `depth`) and a profile.  Profile
-weights default to `1`; strategies override only the node types they want to
-prioritize.  Profiles can also penalize a sum directly inside a product or
-power, which lets `expanded` prefer distributed forms without inspecting the
-e-graph.
+All strategies combine the preset and user rules into one rule set and run
+them over one e-graph.  The difference in output comes only from the
+extraction cost used after saturation stops.  A strategy is a name,
+description, cost kind (`size` or `depth`) and a profile.  The default
+profile encodes canonical preferences: products and sums are weighted above
+leaves so repeated terms become coefficients and repeated factors become
+powers (`x + x -> 2*x`, `x*x -> x^2`), while sums of products are penalized
+so factoring wins when node counts are tied.  Each strategy may then adjust
+the weights or penalties that match its purpose.
 
 | Strategy | Purpose | Cost |
 | --- | --- | --- |
-| `simplified` | compact weighted form | size with balanced node weights |
+| `simplified` | canonical weighted form | size with canonical weights |
 | `expanded` | distributed products and powers | size with sum-in-product/power penalties |
-| `factored` | products preferred over sums | size with high add/sub weights |
-| `shallow` | lowest nesting depth | depth with default node weights |
+| `factored` | products preferred over sums | size with higher add/sub weights |
+| `shallow` | lowest nesting depth | depth with canonical weights |
 
 Identical output strings are shown only once.  A stop-reason marker such as
 `~iteration limit` means the runner stopped before saturation; tune the limits
-with `--max-iterations`, `--max-nodes` and `--time-limit`.
+with `--max-iterations`, `--max-nodes`, `--max-depth` and `--time-limit`.
+
+Saturation uses egg's backoff scheduler for expensive rules and rejects
+rewrites that would exceed the configured expression depth.  This keeps
+inverse rules such as distribution and factoring from growing the e-graph
+without bound while preserving a single, strategy-independent rule set.  The
+engine also keeps at most one constant value in an e-class, so floating-point
+rounding or underflow cannot make a literal `0`/`1` rule match an unrelated
+symbolic term.
 
 ## Logging
 

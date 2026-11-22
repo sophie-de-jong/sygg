@@ -7,10 +7,14 @@ use std::path::Path;
 use std::sync::LazyLock;
 use std::time::Duration;
 
-use egg::{CostFunction, EGraph, Extractor, Id, Language, Runner, StopReason};
+use egg::{
+    BackoffScheduler, CostFunction, EGraph, Extractor, Id, Language, RecExpr, Runner, StopReason,
+};
+use log::{debug, trace};
 
-use crate::analysis::ConstantFolding;
+use crate::analysis::{ConstantFolding, MathRewrite};
 use crate::ast::{Ast, parse_expression, pretty_ast, pretty_recexpr};
+use crate::constant::Constant;
 use crate::error::{AlgebraError, Result};
 use crate::language::Math;
 use crate::rewrite::{Rule, parse_rules, parse_rules_file};
@@ -19,7 +23,8 @@ use crate::rewrite::{Rule, parse_rules, parse_rules_file};
 pub struct EngineConfig {
     pub max_iterations: usize,
     pub max_nodes: usize,
-    pub time_limit_ms: u64,
+    pub time_limit: Duration,
+    pub max_depth: usize,
     pub load_default_rules: bool,
 }
 
@@ -28,7 +33,8 @@ impl Default for EngineConfig {
         Self {
             max_iterations: 15,
             max_nodes: 20_000,
-            time_limit_ms: 750,
+            time_limit: Duration::from_millis(750),
+            max_depth: 32,
             load_default_rules: true,
         }
     }
@@ -98,6 +104,7 @@ impl From<&Math> for NodeKind {
 pub struct Cost {
     pub value: usize,
     pub kind: NodeKind,
+    negative_constant: bool,
 }
 
 impl PartialEq for Cost {
@@ -133,15 +140,20 @@ struct Profile {
     vec: usize,
     mul_sum_penalty: usize,
     pow_sum_penalty: usize,
+    sum_product_penalty: usize,
+    sum_power_penalty: usize,
+    negative_power_penalty: usize,
 }
 
 impl Default for Profile {
     fn default() -> Self {
         Self {
             leaf: 1,
-            add: 1,
-            sub: 1,
-            mul: 1,
+            // Prefer canonical coefficients and powers over repeated nodes:
+            // x + x -> 2 * x, x * x -> x^2.
+            add: 3,
+            sub: 3,
+            mul: 2,
             div: 1,
             pow: 1,
             neg: 1,
@@ -149,6 +161,12 @@ impl Default for Profile {
             vec: 1,
             mul_sum_penalty: 0,
             pow_sum_penalty: 0,
+            // Prefer factored sums when node counts are tied.
+            sum_product_penalty: 1,
+            sum_power_penalty: 0,
+            // `x^(-1)` and `1 / x` have the same node count; prefer the
+            // reciprocal, which is the conventional simplified form.
+            negative_power_penalty: 1,
         }
     }
 }
@@ -203,6 +221,9 @@ impl CostFunction<Math> for Strategy {
         let mut max_child = 0;
         let mut first_child_kind = None;
         let mut child_has_sum = false;
+        let mut child_has_product = false;
+        let mut child_has_power = false;
+        let mut negative_exponent = false;
 
         for (index, child_id) in enode.children().iter().enumerate() {
             let child = costs(*child_id);
@@ -210,8 +231,17 @@ impl CostFunction<Math> for Strategy {
             if index == 0 {
                 first_child_kind = Some(child.kind);
             }
+            if index == 1 && child.negative_constant {
+                negative_exponent = true;
+            }
             if child.kind == NodeKind::Sum {
                 child_has_sum = true;
+            }
+            if child.kind == NodeKind::Product {
+                child_has_product = true;
+            }
+            if child.kind == NodeKind::Power {
+                child_has_power = true;
             }
 
             match self.cost_kind {
@@ -230,8 +260,26 @@ impl CostFunction<Math> for Strategy {
         if kind == NodeKind::Power && first_child_kind == Some(NodeKind::Sum) {
             value = value.saturating_add(self.profile.pow_sum_penalty);
         }
+        if kind == NodeKind::Power && negative_exponent {
+            value = value.saturating_add(self.profile.negative_power_penalty);
+        }
+        if kind == NodeKind::Sum && child_has_product {
+            value = value.saturating_add(self.profile.sum_product_penalty);
+        }
+        if kind == NodeKind::Sum && child_has_power {
+            value = value.saturating_add(self.profile.sum_power_penalty);
+        }
 
-        Cost { value, kind }
+        let negative_constant = matches!(
+            enode,
+            Math::Const(Constant::Real(real)) if real.get() < 0.0
+        );
+
+        Cost {
+            value,
+            kind,
+            negative_constant,
+        }
     }
 }
 
@@ -250,6 +298,7 @@ static STRATEGIES: LazyLock<Vec<Strategy>> = LazyLock::new(|| {
             profile: Profile {
                 mul_sum_penalty: 10_000,
                 pow_sum_penalty: 10_000,
+                sum_product_penalty: 0,
                 ..Profile::default()
             },
         },
@@ -258,9 +307,9 @@ static STRATEGIES: LazyLock<Vec<Strategy>> = LazyLock::new(|| {
             description: "products preferred over sums",
             cost_kind: CostKind::Size,
             profile: Profile {
-                add: 3,
-                sub: 3,
-                pow: 2,
+                add: 4,
+                sub: 4,
+                sum_power_penalty: 10_000,
                 ..Profile::default()
             },
         },
@@ -278,10 +327,24 @@ pub struct DefaultRuleFile {
     pub source: &'static str,
 }
 
-const DEFAULT_RULE_FILES: &[DefaultRuleFile] = &[DefaultRuleFile {
-    name: "rules/core.rw",
-    source: include_str!("../rules/core.rw"),
-}];
+const DEFAULT_RULE_FILES: &[DefaultRuleFile] = &[
+    DefaultRuleFile {
+        name: "rules/core.rw",
+        source: include_str!("../rules/core.rw"),
+    },
+    DefaultRuleFile {
+        name: "rules/normalize.rw",
+        source: include_str!("../rules/normalize.rw"),
+    },
+    DefaultRuleFile {
+        name: "rules/expanded.rw",
+        source: include_str!("../rules/expanded.rw"),
+    },
+    DefaultRuleFile {
+        name: "rules/factored.rw",
+        source: include_str!("../rules/factored.rw"),
+    },
+];
 
 pub struct AlgebraEngine {
     config: EngineConfig,
@@ -440,53 +503,17 @@ impl AlgebraEngine {
     }
 
     pub fn simplify_ast(&self, ast: &Ast) -> Result<Vec<StrategyResult>> {
-        log::debug!("simplifying {}", pretty_ast(ast));
+        debug!("simplifying {}", pretty_ast(ast));
         let expression = ast.to_recexpr();
         let rules = self
             .rules
             .iter()
-            .map(Rule::to_rewrite)
+            .map(|rule| rule.to_bounded_rewrite(self.config.max_depth))
             .collect::<Result<Vec<_>>>()?;
 
-        // Variables are represented as ordinary symbols in the e-graph.
-        // Union each symbol with its definition so congruence, rewrites and
-        // constant folding see the definition without a separate AST pass.
-        let mut egraph = EGraph::<Math, ConstantFolding>::default();
-        let mut variable_ids = Vec::new();
-        for variable in &self.vars {
-            let variable_id = egraph.add(Math::Symbol(variable.name.as_str().into()));
-            let value_id = egraph.add_expr(&variable.value.to_recexpr());
-            egraph.union(variable_id, value_id);
-            variable_ids.push((variable.name.clone(), variable_id));
-        }
-        egraph.rebuild();
-
-        let mut runner = Runner::<Math, ConstantFolding, ()>::default()
-            .with_egraph(egraph)
-            .with_expr(&expression)
-            .with_iter_limit(self.config.max_iterations)
-            .with_node_limit(self.config.max_nodes)
-            .with_time_limit(Duration::from_millis(self.config.time_limit_ms))
-            .run(&rules);
-
-        log::debug!(
-            "runner finished after {} iteration(s), {} e-node(s), stop reason {:?}",
-            runner.iterations.len(),
-            runner.egraph.total_size(),
-            runner.stop_reason
-        );
-
-        // The variable symbols were only needed to seed the unions.  Removing
-        // them before extraction makes the displayed result show definitions
-        // rather than the variable name, which is what a calculator-style
-        // result should do.
-        for (name, variable_id) in &variable_ids {
-            let class_id = runner.egraph.find(*variable_id);
-            runner.egraph[class_id]
-                .nodes
-                .retain(|node| !matches!(node, Math::Symbol(symbol) if symbol.as_str() == name));
-        }
-
+        // One strategy-independent saturation run.  Every strategy extracts
+        // from the same e-graph; only its cost function differs.
+        let runner = self.run_with_rules(&expression, &rules)?;
         let root = runner
             .roots
             .first()
@@ -496,31 +523,24 @@ impl AlgebraEngine {
             .stop_reason
             .clone()
             .ok_or_else(|| AlgebraError::Message("egg did not report a stop reason".to_string()))?;
-        log::trace!("root eclass {root} nodes: {:?}", runner.egraph[root].nodes);
 
         let mut results = Vec::new();
         let mut seen = HashSet::new();
 
-        // Every strategy uses the same e-graph.  Only the extraction cost
-        // differs, so this is the point where the displayed forms diverge.
         for strategy in STRATEGIES.iter() {
             let extractor = Extractor::new(&runner.egraph, strategy.clone());
-            let (_, best) = extractor.find_best(root);
-
-            // Recompute the cost recursively over the extracted expression.
-            let mut cost_function = strategy.clone();
-            let cost = cost_function.cost_rec(&best).value;
+            let (cost, best) = extractor.find_best(root);
 
             let result = StrategyResult {
                 strategy: strategy.name,
                 description: strategy.description,
                 expression: pretty_recexpr(&best),
-                cost,
+                cost: cost.value,
                 cost_kind: strategy.cost_kind,
                 stop_reason: stop_reason.clone(),
             };
 
-            log::trace!(
+            trace!(
                 "strategy {} produced {} ({} {})",
                 result.strategy, result.expression, result.cost_kind, result.cost
             );
@@ -531,6 +551,56 @@ impl AlgebraEngine {
         }
 
         Ok(results)
+    }
+
+    fn run_with_rules(
+        &self,
+        expression: &RecExpr<Math>,
+        rules: &[MathRewrite],
+    ) -> Result<Runner<Math, ConstantFolding, ()>> {
+        // Variables are represented as ordinary symbols in the e-graph.
+        // Union each symbol with its definition so congruence, rewrites and
+        // constant folding see the definition without a separate AST pass.
+        let analysis = ConstantFolding::new(self.config.max_depth);
+        let mut egraph = EGraph::<Math, ConstantFolding>::new(analysis);
+        let mut variable_ids = Vec::new();
+        for variable in &self.vars {
+            let variable_id = egraph.add(Math::Symbol(variable.name.as_str().into()));
+            let value_id = egraph.add_expr(&variable.value.to_recexpr());
+            egraph.union(variable_id, value_id);
+            variable_ids.push((variable.name.as_str(), variable_id));
+        }
+        egraph.rebuild();
+
+        let mut runner = Runner::<Math, ConstantFolding, ()>::default()
+            .with_egraph(egraph)
+            .with_expr(expression)
+            .with_iter_limit(self.config.max_iterations)
+            .with_node_limit(self.config.max_nodes)
+            .with_time_limit(self.config.time_limit)
+            .with_scheduler(
+                BackoffScheduler::default()
+                    .with_initial_match_limit(256)
+                    .with_ban_length(5),
+            )
+            .run(rules);
+
+        debug!(
+            "runner finished after {} iteration(s), {} e-node(s), stop reason {:?}",
+            runner.iterations.len(),
+            runner.egraph.total_size(),
+            runner.stop_reason
+        );
+
+        // Variable symbols were only needed to seed the unions.
+        for (name, variable_id) in variable_ids {
+            let class_id = runner.egraph.find(variable_id);
+            runner.egraph[class_id]
+                .nodes
+                .retain(|node| !matches!(node, Math::Symbol(symbol) if symbol.as_str() == name));
+        }
+
+        Ok(runner)
     }
 }
 
@@ -645,6 +715,30 @@ mod tests {
     }
 
     #[test]
+    fn canonicalizes_repeated_terms_and_factors() {
+        assert_eq!(outputs("x * x"), vec!["x^2"]);
+        assert_eq!(outputs("x + x"), vec!["2 * x"]);
+        let repeated = outputs("x * y * x");
+        assert!(
+            repeated.iter().any(|value| value.contains("x^2")),
+            "{repeated:?}"
+        );
+        assert!(
+            repeated.iter().all(|value| !value.contains("x * x")),
+            "{repeated:?}"
+        );
+        assert_eq!(outputs("x * x * x"), vec!["x^3"]);
+
+        let factored = outputs("x * y + x");
+        assert!(
+            factored
+                .iter()
+                .any(|value| value.contains("x * (") && value.contains("y + 1")),
+            "{factored:?}"
+        );
+    }
+
+    #[test]
     fn var_bindings_union() {
         let mut engine = engine();
         engine
@@ -697,12 +791,15 @@ mod tests {
     }
 
     #[test]
-    fn profile_defaults_have_unit_weights() {
+    fn profile_defaults_are_canonical() {
         let profile = Profile::default();
         assert_eq!(profile.leaf, 1);
-        assert_eq!(profile.add, 1);
-        assert_eq!(profile.mul, 1);
+        assert_eq!(profile.add, 3);
+        assert_eq!(profile.mul, 2);
+        assert_eq!(profile.pow, 1);
         assert_eq!(profile.mul_sum_penalty, 0);
+        assert_eq!(profile.sum_product_penalty, 1);
+        assert_eq!(profile.sum_power_penalty, 0);
     }
 
     #[test]

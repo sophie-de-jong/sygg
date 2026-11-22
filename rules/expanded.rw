@@ -1,0 +1,8 @@
+# Scalar distribution and expansion.
+distribute: a * (b + c) => a * b + a * c
+distribute-right: (a + b) * c => a * c + b * c
+expand-square: (a + b) ^ 2 => a ^ 2 + 2 * a * b + b ^ 2 if is_scalar(a) and is_scalar(b)
+expand-square-diff: (a - b) ^ 2 => a ^ 2 - 2 * a * b + b ^ 2 if is_scalar(a) and is_scalar(b)
+expand-cube: (a + b) ^ 3 => a ^ 3 + 3 * a ^ 2 * b + 3 * a * b ^ 2 + b ^ 3 if is_scalar(a) and is_scalar(b)
+expand-cube-diff: (a - b) ^ 3 => a ^ 3 - 3 * a ^ 2 * b + 3 * a * b ^ 2 - b ^ 3 if is_scalar(a) and is_scalar(b)
+difference-product: (a + b) * (a - b) => a ^ 2 - b ^ 2 if is_scalar(a) and is_scalar(b)

@@ -7,7 +7,7 @@
 //! way to perform constant folding and makes the result available to normal
 //! rewrite rules and extraction.
 
-use egg::{Analysis, DidMerge, EGraph, Id, Rewrite, merge_option};
+use egg::{Analysis, DidMerge, EGraph, Id, Language, Rewrite, merge_option};
 
 use crate::constant::{Constant, Matrix, Real};
 use crate::functions::Function;
@@ -16,38 +16,88 @@ use crate::language::Math;
 pub type MathEGraph = EGraph<Math, ConstantFolding>;
 pub type MathRewrite = Rewrite<Math, ConstantFolding>;
 
-#[derive(Clone, Default)]
-pub struct ConstantFolding;
+#[derive(Clone, Debug, Default)]
+pub struct AlgebraData {
+    pub constant: Option<Constant>,
+    /// Maximum AST depth represented by this e-class.  Using an upper bound
+    /// makes the rewrite depth limit conservative: a rule is rejected if any
+    /// representative of a child class could make the result too deep.
+    pub depth: usize,
+}
 
-impl Analysis<Math> for ConstantFolding {
-    type Data = Option<Constant>;
+#[derive(Clone, Debug)]
+pub struct ConstantFolding {
+    depth_cap: usize,
+}
 
-    fn make(egraph: &mut MathEGraph, enode: &Math, _id: Id) -> Self::Data {
-        let child = |id: &Id| egraph[*id].data.clone();
+impl Default for ConstantFolding {
+    fn default() -> Self {
+        Self { depth_cap: 64 }
+    }
+}
 
-        match enode {
-            Math::Const(value) => Some(value.clone()),
-            Math::Symbol(_) => None,
-            Math::Add([a, b]) => child(a)?.add(&child(b)?),
-            Math::Sub([a, b]) => child(a)?.sub(&child(b)?),
-            Math::Mul([a, b]) => child(a)?.mul(&child(b)?),
-            Math::Div([a, b]) => child(a)?.div(&child(b)?),
-            Math::Pow([a, b]) => child(a)?.pow(&child(b)?),
-            Math::Neg(inner) => child(inner)?.neg(),
-            Math::Call(name, arguments) => {
-                let function: Function = name.as_str().parse().ok()?;
-                let arguments = arguments.iter().map(child).collect::<Option<Vec<_>>>()?;
-                function.eval(&arguments)
-            }
-            Math::VecLit(items) => {
-                let values = items.iter().map(child).collect::<Option<Vec<_>>>()?;
-                constant_from_values(values)
-            }
+impl ConstantFolding {
+    pub fn new(depth_cap: usize) -> Self {
+        Self {
+            depth_cap: depth_cap.max(1),
         }
     }
 
+    fn constant_of(egraph: &MathEGraph, id: Id) -> Option<Constant> {
+        egraph[id].data.constant.clone()
+    }
+
+    fn depth_of(egraph: &MathEGraph, id: Id) -> usize {
+        egraph[id].data.depth
+    }
+}
+
+impl Analysis<Math> for ConstantFolding {
+    type Data = AlgebraData;
+
+    fn make(egraph: &mut MathEGraph, enode: &Math, _id: Id) -> Self::Data {
+        let child_constant = |id: &Id| Self::constant_of(egraph, *id);
+        let depth = (1 + enode
+            .children()
+            .iter()
+            .map(|id| Self::depth_of(egraph, *id))
+            .max()
+            .unwrap_or(0))
+        .min(egraph.analysis.depth_cap);
+
+        let constant = (|| -> Option<Constant> {
+            match enode {
+                Math::Const(value) => Some(value.clone()),
+                Math::Symbol(_) => None,
+                Math::Add([a, b]) => child_constant(a)?.add(&child_constant(b)?),
+                Math::Sub([a, b]) => child_constant(a)?.sub(&child_constant(b)?),
+                Math::Mul([a, b]) => child_constant(a)?.mul(&child_constant(b)?),
+                Math::Div([a, b]) => child_constant(a)?.div(&child_constant(b)?),
+                Math::Pow([a, b]) => child_constant(a)?.pow(&child_constant(b)?),
+                Math::Neg(inner) => child_constant(inner)?.neg(),
+                Math::Call(name, arguments) => {
+                    let function: Function = name.as_str().parse().ok()?;
+                    let arguments = arguments
+                        .iter()
+                        .map(child_constant)
+                        .collect::<Option<Vec<_>>>()?;
+                    function.eval(&arguments)
+                }
+                Math::VecLit(items) => {
+                    let values = items
+                        .iter()
+                        .map(child_constant)
+                        .collect::<Option<Vec<_>>>()?;
+                    constant_from_values(values)
+                }
+            }
+        })();
+
+        AlgebraData { constant, depth }
+    }
+
     fn merge(&mut self, to: &mut Self::Data, from: Self::Data) -> DidMerge {
-        merge_option(to, from, |existing, new| {
+        let constant_merge = merge_option(&mut to.constant, from.constant, |existing, new| {
             if *existing == new {
                 DidMerge(false, false)
             } else if new < *existing {
@@ -56,11 +106,43 @@ impl Analysis<Math> for ConstantFolding {
             } else {
                 DidMerge(false, true)
             }
-        })
+        });
+
+        let merged_depth = to.depth.max(from.depth).min(self.depth_cap);
+        let depth_changed = merged_depth > to.depth;
+        if depth_changed {
+            to.depth = merged_depth;
+        }
+
+        constant_merge | DidMerge(depth_changed, false)
     }
 
     fn modify(egraph: &mut MathEGraph, id: Id) {
-        if let Some(value) = egraph[id].data.clone() {
+        // Do not assert that a class containing a free symbol is constant.
+        // A class can acquire a stale or cyclic constant during saturation;
+        // folding that value into the class would make unrelated symbolic
+        // terms equal (for example x = x * 0.5) and collapse the e-graph.
+        if egraph[id]
+            .nodes
+            .iter()
+            .any(|node| matches!(node, Math::Symbol(_)))
+        {
+            return;
+        }
+        if let Some(value) = egraph[id].data.constant.clone() {
+            // Floating-point evaluation and saturation can make a class
+            // contain mathematically equal expressions that rounded to
+            // different values, or can underflow a very small value to zero.
+            // Never merge distinct constants into one e-class: doing so
+            // would make the class simultaneously equal to several numbers
+            // (for example an underflowed zero would make `x * 0.5` zero).
+            let has_different_constant = egraph[id]
+                .nodes
+                .iter()
+                .any(|node| matches!(node, Math::Const(existing) if existing != &value));
+            if has_different_constant {
+                return;
+            }
             let constant_id = egraph.add(Math::Const(value));
             if egraph.find(id) != egraph.find(constant_id) {
                 egraph.union(id, constant_id);
@@ -123,6 +205,7 @@ mod tests {
         assert_eq!(
             runner.egraph[runner.roots[0]]
                 .data
+                .constant
                 .as_ref()
                 .unwrap()
                 .to_string(),

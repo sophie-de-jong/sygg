@@ -1,55 +1,31 @@
-# Core algebraic identities and simple function facts.
-# Syntax: [name:] left-hand-side => right-hand-side [if condition]
-
-# Commutativity and associativity.
-add-comm: a + b => b + a
-add-assoc: (a + b) + c => a + (b + c)
-mul-comm: a * b => b * a
-
-# Additive identities.
-add-zero: a + 0 => a
-zero-add: 0 + a => a
-sub-zero: a - 0 => a
-sub-self: a - a => 0
-add-self: a + a => 2 * a
-
-# Multiplicative identities.
-mul-zero: a * 0 => 0
-zero-mul: 0 * a => 0
+add-comm: a + b => b + a if not is_const(a) and not is_const(b)
+add-assoc: (a + b) + c => a + (b + c) if not is_const(a) and not is_const(b) and not is_const(c)
+mul-comm: a * b => b * a if is_scalar(a) and is_scalar(b) and not is_const(a) and not is_const(b)
+combine-repeat-left: (a * b) * a => (a ^ 2) * b if is_scalar(a) and is_scalar(b) and not is_const(a) and not is_const(b)
+combine-repeat-right: a * (b * a) => (a ^ 2) * b if is_scalar(a) and is_scalar(b) and not is_const(a) and not is_const(b)
+add-zero: a + 0 => a if is_scalar(a)
+zero-add: 0 + a => a if is_scalar(a)
+sub-zero: a - 0 => a if is_scalar(a)
+sub-self: a - a => 0 if is_scalar(a) and not is_const(a)
+add-self: a + a => 2 * a if not is_const(a)
+mul-zero: a * 0 => 0 if is_scalar(a)
+zero-mul: 0 * a => 0 if is_scalar(a)
 mul-one: a * 1 => a
 one-mul: 1 * a => a
 div-one: a / 1 => a
-div-self: a / a => 1 if a != 0
-zero-div: 0 / a => 0 if a != 0
-
-# Negation.
+div-self: a / a => 1 if is_scalar(a) and a != 0 and not is_const(a)
+zero-div: 0 / a => 0 if is_scalar(a) and a != 0 and not is_const(a)
 neg-neg: -(-a) => a
 add-neg: a + (-b) => a - b
 sub-neg: a - (-b) => a + b
 neg-mul-left: (-a) * b => -(a * b)
 neg-mul-right: a * (-b) => -(a * b)
-
-# Powers.
-pow-zero: a ^ 0 => 1 if a != 0
+pow-zero: a ^ 0 => 1 if is_scalar(a) and a != 0 and not is_const(a)
 pow-one: a ^ 1 => a
-one-pow: 1 ^ a => 1
-mul-pow: a * a => a ^ 2
-
-# Distributed / expanded forms.
-distribute: a * (b + c) => a * b + a * c
-distribute-right: (a + b) * c => a * c + b * c
-expand-square: (a + b) ^ 2 => a ^ 2 + 2 * a * b + b ^ 2
-expand-square-diff: (a - b) ^ 2 => a ^ 2 - 2 * a * b + b ^ 2
-expand-cube: (a + b) ^ 3 => a ^ 3 + 3 * a ^ 2 * b + 3 * a * b ^ 2 + b ^ 3
-expand-cube-diff: (a - b) ^ 3 => a ^ 3 - 3 * a ^ 2 * b + 3 * a * b ^ 2 - b ^ 3
-
-# Factored forms.
-factor: a * b + a * c => a * (b + c)
-factor-right: b * a + c * a => (b + c) * a
-factor-sub: a * b - a * c => a * (b - c)
-factor-right-sub: b * a - c * a => (b - c) * a
-
-# Constant function facts.
+one-pow: 1 ^ a => 1 if is_scalar(a)
+mul-pow: a * a => a ^ 2 if is_scalar(a) and not is_const(a)
+mul-pow-left: (a ^ b) * a => a ^ (b + 1) if is_scalar(a) and is_scalar(b) and not is_const(a)
+mul-pow-right: a * (a ^ b) => a ^ (b + 1) if is_scalar(a) and is_scalar(b) and not is_const(a)
 sin-zero: sin(0) => 0
 cos-zero: cos(0) => 1
 tan-zero: tan(0) => 0
@@ -61,13 +37,56 @@ log10-one: log10(1) => 0
 sqrt-zero: sqrt(0) => 0
 sqrt-one: sqrt(1) => 1
 abs-zero: abs(0) => 0
-
-# Function identities.
 abs-abs: abs(abs(a)) => abs(a)
 abs-neg: abs(-a) => abs(a)
 sin-neg: sin(-a) => -sin(a)
 cos-neg: cos(-a) => cos(a)
-exp-ln: exp(ln(a)) => a
-ln-exp: ln(exp(a)) => a
-sqrt-square: sqrt(a ^ 2) => abs(a)
-trig-identity: sin(a) ^ 2 + cos(a) ^ 2 => 1
+exp-ln: exp(ln(a)) => a if is_scalar(a) and a > 0
+ln-exp: ln(exp(a)) => a if is_scalar(a)
+sqrt-square: sqrt(a ^ 2) => abs(a) if is_scalar(a)
+trig-identity: sin(a) ^ 2 + cos(a) ^ 2 => 1 if is_scalar(a)
+
+# Power algebra.
+pow-mul: (a ^ b) * (a ^ c) => a ^ (b + c) if is_scalar(a) and is_scalar(b) and is_scalar(c) and not is_const(a)
+pow-pow: (a ^ b) ^ c => a ^ (b * c) if is_scalar(a) and is_scalar(b) and is_scalar(c) and not is_const(a)
+pow-product: (a * b) ^ c => (a ^ c) * (b ^ c) if is_scalar(a) and is_scalar(b) and is_scalar(c) and not is_const(a) and not is_const(b)
+pow-div: (a ^ b) / (a ^ c) => a ^ (b - c) if is_scalar(a) and is_scalar(b) and is_scalar(c) and not is_const(a)
+pow-div-base: (a ^ b) / a => a ^ (b - 1) if is_scalar(a) and is_scalar(b) and not is_const(a)
+div-base-pow: a / (a ^ c) => a ^ (1 - c) if is_scalar(a) and is_scalar(c) and not is_const(a)
+neg-pow: a ^ (-b) => 1 / (a ^ b) if is_scalar(a) and is_scalar(b) and b > 0
+
+# Fraction algebra.
+div-cancel-left: (a * b) / b => a if is_scalar(a) and is_scalar(b) and b != 0
+div-cancel-right: (a * b) / a => b if is_scalar(a) and is_scalar(b) and a != 0
+mul-div-cancel: (a / b) * b => a if is_scalar(a) and is_scalar(b) and b != 0
+mul-recip: a * (1 / a) => 1 if is_scalar(a) and a != 0
+recip-recip: 1 / (1 / a) => a if is_scalar(a) and a != 0
+
+# Negation and cancellation.
+neg-add: -(a + b) => -a - b if is_scalar(a) and is_scalar(b)
+neg-sub: -(a - b) => -a + b if is_scalar(a) and is_scalar(b)
+neg-sub-left: (-a) - b => -(a + b) if is_scalar(a) and is_scalar(b)
+neg-self-add: (-a) - a => -2 * a if is_scalar(a)
+neg-square: (-a) ^ 2 => a ^ 2 if is_scalar(a)
+cancel-add-left: (a + b) - a => b if is_scalar(a) and is_scalar(b)
+cancel-add-right: (a + b) - b => a if is_scalar(a) and is_scalar(b)
+cancel-sub-left: (a - b) + b => a if is_scalar(a) and is_scalar(b)
+cancel-sub-right: a + (b - a) => b if is_scalar(a) and is_scalar(b)
+
+# Constant-coefficient collection.
+
+# Function identities.
+one-minus-sin2: 1 - sin(a) ^ 2 => cos(a) ^ 2 if is_scalar(a)
+one-minus-cos2: 1 - cos(a) ^ 2 => sin(a) ^ 2 if is_scalar(a)
+tan-def: sin(a) / cos(a) => tan(a) if is_scalar(a)
+exp-mul: exp(a) * exp(b) => exp(a + b) if is_scalar(a) and is_scalar(b)
+abs-square: abs(a) ^ 2 => a ^ 2 if is_scalar(a)
+abs-mul: abs(a * b) => abs(a) * abs(b) if is_scalar(a) and is_scalar(b)
+min-self: min(a, a) => a if is_scalar(a)
+max-self: max(a, a) => a if is_scalar(a)
+
+# Constant coefficient and multiplication association.
+neg-one-mul: (-1) * x => -x if is_scalar(x)
+neg-one-mul-right: x * (-1) => -x if is_scalar(x)
+add-div-general: a / b + c / d => (a * d + c * b) / (b * d) if is_scalar(a) and is_scalar(b) and is_scalar(c) and is_scalar(d) and b != 0 and d != 0 and not (is_const(a) and is_const(b) and is_const(c) and is_const(d))
+reciprocal-power: a ^ b => 1 / a if b == -1 and is_scalar(a) and a != 0

@@ -9,6 +9,7 @@
     - Verbose flag (i.e. -v, -vvv)
 
 ## Version 0.2
+- No postfix plus
 - Greek letter insertions
     - A user types "theta" and it shows "→ θ" in dim, they press space and it converts theta into the symbol
     - The user can press escape to remove the "→ θ" and it won't convert

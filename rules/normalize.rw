@@ -1,0 +1,21 @@
+# Scalar like-term and coefficient collection.
+combine-like-add-left: x * a + x * b => x * (a + b) if is_scalar(a) and is_scalar(b) and is_scalar(x)
+combine-like-sub-left: x * a - x * b => x * (a - b) if is_scalar(a) and is_scalar(b) and is_scalar(x)
+combine-like-sub: a * x - b * x => (a - b) * x if is_scalar(a) and is_scalar(b) and is_scalar(x)
+combine-like-one-add: a * x + x => (a + 1) * x if is_scalar(a) and is_scalar(x)
+combine-like-one-add-left: x * a + x => x * (a + 1) if is_scalar(a) and is_scalar(x)
+combine-like-one-sub: a * x - x => (a - 1) * x if is_scalar(a) and is_scalar(x)
+combine-like-one-sub-left: x * a - x => x * (a - 1) if is_scalar(a) and is_scalar(x)
+
+# Constant coefficient collection.
+combine-const-add: a * x + b * x => (a + b) * x if is_const(a) and is_const(b) and is_scalar(x)
+combine-const-sub: a * x - b * x => (a - b) * x if is_const(a) and is_const(b) and is_scalar(x)
+combine-const-one-add: a * x + x => (a + 1) * x if is_const(a) and is_scalar(x)
+combine-const-one-sub: a * x - x => (a - 1) * x if is_const(a) and is_scalar(x)
+mul-const-assoc-left: (a * x) * b => (a * b) * x if is_const(a) and is_const(b) and is_scalar(x)
+mul-const-assoc-right: (x * a) * b => x * (a * b) if is_const(a) and is_const(b) and is_scalar(x)
+mul-const-square-left: (a * x) * x => a * (x ^ 2) if is_const(a) and is_scalar(x)
+mul-const-square-right: (x * a) * x => (x ^ 2) * a if is_const(a) and is_scalar(x)
+combine-const-one-sub-rev: x - a * x => (1 - a) * x if is_const(a) and is_scalar(x)
+neg-coefficient: a * x => -x if a == -1 and is_scalar(x)
+neg-coefficient-right: x * a => -x if a == -1 and is_scalar(x)
